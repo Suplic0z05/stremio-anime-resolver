@@ -1,0 +1,39 @@
+{
+  "name": "stremio-anime-resolver",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Stremio addon resolver: animeworld/animesaturn/animeunity direct-HTTPS streams plus Kitsu metadata. Node >= 20, ESM, zero npm dependencies.",
+  "type": "module",
+  "license": "GPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Suplic0z05/stremio-anime-resolver.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Suplic0z05/stremio-anime-resolver/issues"
+  },
+  "homepage": "https://github.com/Suplic0z05/stremio-anime-resolver#readme",
+  "engines": {
+    "node": ">=20"
+  },
+  "author": "Suplic0z05",
+  "main": "src/server.js",
+  "exports": {
+    ".": "./src/server.js",
+    "./kitsu": "./src/kitsu.js",
+    "./resolver": "./src/resolver.js"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/",
+    "check": "for f in $(find src test \\( -name '*.js' -o -name '*.mjs' \\) | sort); do node --check \"$f\" || exit 1; done"
+  },
+  "keywords": [
+    "stremio",
+    "addon",
+    "anime",
+    "kitsu",
+    "streaming"
+  ],
+  "dependencies": {}
+}

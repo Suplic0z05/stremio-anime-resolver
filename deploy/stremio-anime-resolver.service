@@ -1,0 +1,214 @@
+[Unit]
+Description=stremio-anime-resolver (addon Stremio, server HTTP Node ESM a zero dipendenze)
+Documentation=file:///home/suplic0z/Projects/stremio-anime-resolver/DEPLOYMENT.md
+Documentation=file:///home/suplic0z/Projects/stremio-anime-resolver/README.md
+
+# Nota su `After=network-online.target`: qui NON e' un requisito di avvio.
+# Il server non contatta nessuno durante il boot: Kitsu e i tre scraper vengono
+# interrogati per richiesta (`src/routes/*.js`), quindi partire offline e'
+# legittimo e le prime richieste falliranno e basta. `network-online` serve a non
+# sprecare un restart se il link non e' ancora su quando parte il servizio.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# ---------------------------------------------------------------------------
+# Identita'
+# ---------------------------------------------------------------------------
+# ATTENZIONE, e' il punto in cui questa unita' si discosta dal testo ideale di
+# un servizio hardening: qui gira come l'utente proprietario dell'albero, non
+# come un account dedicato. Il motivo e' una misura, non una scelta di comodo:
+#
+#   /home/suplic0z           drwxr-xr-x  (0755)
+#   /home/suplic0z/Projects  drwxr-x---  (0750)   <-- collo di bottiglia
+#   /home/suplic0z/Projects/stremio-anime-resolver   0755
+#
+# `Projects` e' 0750 e non contiene altri membri oltre `suplic0z`, quindi un
+# utente dedicato (`stremio-anime-resolver`, `nobody`, ...) non puo' neppure
+# attraversare la directory per arrivare a `src/server.js`. Rimettere `User=`
+# su un account dedicato richiede PRIMA di spostare l'applicazione in un punto
+# traversabile da tutti. I comandi esatti sono in DEPLOYMENT.md, sezione
+# "Utente dedicato". Fino ad allora `User=suplic0z` e' la scelta che
+# effettivamente parte.
+User=suplic0z
+Group=suplic0z
+
+# `npm start` e' `node src/server.js` (dichiarato in `package.json`, chiave
+# `scripts.start`); qui e' il comando sottostante con path assoluti, cosi'
+# l'unita' non dipende dal PATH di systemd e non passa da npm. Percorso
+# verificato: /usr/bin/node.
+#
+# Il pavimento Node e' `>=20` (`package.json`, chiave `engines.node`). Non e'
+# ripetuto qui perche' questa direttiva non puo' imporre una versione.
+# CORREZIONE 2026-10-05: questo blocco diceva che "il controllo vero" fosse
+# `Environment=NODE_VERSION` qui sotto. Non lo e'. Era una costante scritta a
+# mano che il journal riportava come se fosse stata misurata, e il servizio
+# gira su un binario di una versione diversa: `ExecStart` usa `/usr/bin/node`,
+# misurato `v26.10.0` con `/usr/bin/node --version`, non 20. Il controllo vero
+# e' il binario: `readlink -f /usr/bin/node` e `/usr/bin/node --version`.
+# `Environment=NODE_VERSION` resta perche' finisce in `/proc/PID/environ` ed e'
+# comodo in un `systemctl show`, ma va letto come "dichiarato", non come
+# "misurato". La versione minima resta 20; l'immagine Docker e'
+# `node:20-bookworm-slim` per lo stesso pavimento.
+WorkingDirectory=/home/suplic0z/Projects/stremio-anime-resolver
+ExecStart=/usr/bin/node /home/suplic0z/Projects/stremio-anime-resolver/src/server.js
+
+# ---------------------------------------------------------------------------
+# Ambiente
+# ---------------------------------------------------------------------------
+# PORT: `src/server.js` legge l'ambiente con
+# `Number.parseInt(process.env.PORT ?? '', 10) || DEFAULT_PORT`, dove
+# `DEFAULT_PORT = 7000`. Il fallback e' SILENZIOSO: un refuso qui non si
+# annuncia, si manifesta come addon che non risponde sulla 7000. Per questo
+# `PORT` e' esplicito invece di ereditato.
+Environment=PORT=7000
+
+# HOST: `DEFAULT_HOST = '127.0.0.1'`, letto con `process.env.HOST ||
+# DEFAULT_HOST`, entrambe in `src/server.js`. Qui si scrive esplicitamente lo
+# stesso loopback, cosi' il default non e' mai quello che regge. Il bind su
+# loopback e' deliberato: l'unico ingresso e la pubblicazione passano dal
+# reverse proxy in locale, che e' il posto dove stanno TLS e controllo
+# accessi. Passare a `0.0.0.0` qui e' legittimo SOLO se un'altra macchina fa
+# da access control, altrimenti esporresti il proxy.
+Environment=HOST=127.0.0.1
+
+# NODE_ENV=production: il codice non lo legge, e' qui per coerenza con
+# l'immagine Docker e con il nome dell'ambiente in `/proc/PID/environ`.
+Environment=NODE_ENV=production
+
+# Dichiarazione, non misura: il valore qui sotto e' quello di
+# `/usr/bin/node` su questo host al 2026-10-05 (`/usr/bin/node --version` ->
+# v26.10.0). Se il binario viene aggiornato, questo numero invecchia e va
+# rimisurato: il journal che dice 26 mentre gira 24 e' una bug di reporting,
+# non un dettaglio. Per il valore autorevole usare il binario.
+Environment=NODE_VERSION=26
+
+# `ADDON_QUIET_LOG=1` spento di proposito: il dispatcher scrive metodo, path,
+# status e durata su stderr (la riga `log('info', 'request', ...` in
+# `src/server.js`; il silenzio si decide in
+# `src/manifest.js` (`createLogger`)). Sono 4 campi per riga, niente body, e sono l'unico
+# modo di sapere se una richiesta e' arrivata e con che status. Mettilo a '1'
+# solo se il journal ti costa piu' di quanto ti serve diagnosticare.
+# Environment=ADDON_QUIET_LOG=1
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=stremio-anime-resolver
+
+# ---------------------------------------------------------------------------
+# Riavvio e arresto
+# ---------------------------------------------------------------------------
+Restart=on-failure
+RestartSec=5s
+
+# `src/server.js` (`SIGTERM` piu' `server.close()`) registra SIGTERM e chiama `server.close()`, che attende
+# le connessioni aperte. Le keep-alive di un client HTTP possono ritardare la
+# chiusura, quindi il timeout serve a non restare in stop fino al 90s di default.
+# `TimeoutStopSig=SIGKILL` e' l'uscita finale di systemd, non una seconda
+# direttiva: qui si dichiara solo il SIGTERM.
+KillSignal=SIGTERM
+TimeoutStopSec=30s
+
+# ---------------------------------------------------------------------------
+# Hardening
+# ---------------------------------------------------------------------------
+# Tutte le direttive di questo blocco sono state scelte contro il bisogno reale
+# del processo: il server legge i propri sorgenti, non scrive nulla e fa
+# richieste HTTPS in uscita. Le due che romperebbero Node sono COMMENTATE, non
+# dimenticate: vedi `MemoryDenyWriteExecute` e `SystemCallFilter` in coda, dove
+# il motivo e' scritto.
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+# ProtectSystem=strict: il filesystem diventa il solo in lettura. Per questo
+# server va bene, perche' `grep -rn "writeFile|mkdir|createWriteStream|sqlite"`
+# su `src/` non trova nulla: non scrive file, non ha database, non ha cache su
+# disco. Non serve quindi nessun `ReadWritePaths=` -- ed e' un'affermazione
+# verificata, non un dettaglio dimenticato. Se in futuro il servizio scrivesse
+# qualcosa, la forma giusta sarebbe una riga `ReadWritePaths=` che punta a una
+# directory creata apposta fuori dall'albero del progetto, per esempio
+#   ReadWritePaths=/var/lib/stremio-anime-resolver
+# (da creare prima con install -d -o <utente> -g <gruppo> -m 0750), perch'
+# `ProtectSystem=strict` rende read-only anche la directory del progetto.
+ProtectSystem=strict
+
+# ProtectHome: `yes` qui sarebbe FATALE, non severo. `yes` rende /home
+# inaccessibile (montata vuota a modo 0000) e l'applicazione sta sotto
+# /home/suplic0z: il serviente non riuscirebbe neppure a leggere
+# `src/server.js` e morirebbe all'avvio. `read-only` e' il valore corretto qui,
+# perche' l'unita' ha bisogno di leggere l'albero e non di scriverci. Se
+# l'applicazione viene spostata in /opt (vedi "Utente dedicato" in
+# DEPLOYMENT.md) questo puo' tornare `yes` senza perdita.
+ProtectHome=read-only
+
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+PrivateDevices=yes
+RemoveIPC=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallErrorNumber=EPERM
+
+# Nessun privilegio e' necessario: la porta 7000 e' sopra 1024, quindi non
+# serve ne' CAP_NET_BIND_SERVICE ne' altro. BoundingSet vuoto significa che il
+# processo non puo' nemmeno acquisirli se un bambino lo chiedesse.
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# AF_UNIX serve al resolver di sistema e a eventuali socket locali;
+# AF_INET/AF_INET6 servono le richieste HTTPS verso Kitsu e i tre scraper.
+# Nessun'altra famiglia serve a questo processo.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+# Node logga su stderr, non su file: 022 sui file che non crea e' comunque il
+# default sensato se un domani ne creasse uno.
+UMask=0022
+
+# --- direttive NON attive, con il motivo ------------------------------------
+# Tre blocchi qui sotto: i primi due romperebbero Node, il terzo e' sospeso per
+# prudenza. Restano scritti perche' il motivo e' il punto, e un domani che li
+# aggiunge senza leggerli fa un debug di un crash che non arriva.
+
+# Rifiutata: V8 compila il JavaScript con un JIT che ha bisogno di memoria
+# scrivibile ED eseguibile contemporaneamente. Con W^X la compilazione del JIT
+# abortisce e il processo muore all'avvio, spesso senza un messaggio utile.
+# Questa non e' una direttiva che si puo' mitigare: e' incompatibile con Node.
+# MemoryDenyWriteExecute=yes
+
+# Sospesa: @system-service non copre l'intera superficie di syscall che V8,
+# la ICU e il thread pool di libusvfs aprono all'avvio, e il sintomo e' un
+# crash o un EPERM dentro Node, non un rifiuto del servizio. Se vuoi
+# stringerla, misuralo: attiva il log con
+#   SystemCallLog=@system-service
+#   SystemCallLogFile=/var/log/stremio-anime-resolver.syscalls
+# riavvia, leggi cosa manca, e solo allora allarga la lista.
+#
+# CORREZIONE 2026-10-05: questo percorso era `/tmp/...`, che e' una trappola con
+# il resto di questa unita'. `PrivateTmp=yes` (attivo qui sopra) monta un /tmp
+# privato nel namespace del servizio: il file si scrive, ma muore a ogni stop,
+# quindi il workflow "riavvia, leggi cosa manca" legge il file vuoto o assente
+# proprio nel momento in cui servirebbe. Sotto `ProtectSystem=strict` anche
+# /var/log e' in sola lettura, quindi il percorso esterno va accompagnato da
+#   ReadWritePaths=/var/log/stremio-anime-resolver.syscalls
+# e la directory va creata prima (install -d -o suplic0z -g suplic0z -m 0750).
+# SystemCallFilter=@system-service
+
+# Sospesa per prudenza: utile a ridurre la vista sui processi degli altri
+# utenti, ma in alcuni setup (container con PID namespace condiviso, o
+# systemd < 247) fallisce l'avvio dell'unita' invece di negare qualcosa.
+# Se il tuo systemd e' >= 247 e il servizio non gira dentro un container,
+# scommenta `ProtectProc=invisible` per aggiungere isolamento.
+# ProtectProc=invisible
+# ProcSubset=pid
+
+[Install]
+WantedBy=multi-user.target

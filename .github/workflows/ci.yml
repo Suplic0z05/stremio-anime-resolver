@@ -1,0 +1,110 @@
+# CI di stremio-anime-resolver.
+#
+# NOTA su due scelte che sembrano omissioni e sono deliberate:
+#
+# 1. NON c'e' uno step `npm install` / `npm ci`. Il progetto dichiara
+#    `dependencies: {}` e non ha un package-lock.json, quindi `npm ci` esce con
+#    "can only install with an existing package-lock.json". Una CI che installa
+#    zero pacchetti non prova niente e aggiunge solo un modo di fallire. Se in
+#    futuro compare una dipendenza vera, qui si aggiunge l'install e si mette su
+#    il lockfile.
+#
+# 2. I test live (SAR_LIVE=1) NON girano su push ne' su pull_request. Colpiscono
+#    siti di terzi, sono lenti e falliscono per motivi che non c'entrano col
+#    codice. Girano solo su richiesta manuale, con l'input `live: true`, cosi'
+#    il green della PR resta un segnale del repository e non dello stato di
+#    animeworld / animesaturn / animeunity in quel momento.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      live:
+        description: "Esegui anche i test live (SAR_LIVE=1) contro i siti di terzi"
+        type: boolean
+        default: false
+
+# Un run precedente sullo stesso branch che venga superato non ha piu' valore:
+# non sprecare minuti su una CI vecchia.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: syntax + test (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Coerente con `engines.node: >=20` in package.json. Il minimo e' il
+        # contratto, gli altri due sono dove i futuri utenti installeranno
+        # davvero Node, e `Array.prototype` / fetch cambiano comportamento.
+        node: ['20', '22', '24']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Sintassi di ogni file in src/ e test/
+        run: npm run check
+
+      - name: Suite offline
+        run: npm test
+
+      - name: Suite live (solo su richiesta manuale)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.live }}
+        env:
+          SAR_LIVE: '1'
+        run: npm test
+
+  docker:
+    name: build immagine
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Nessun setup-node: l'immagine porta gia' Node e non usa dipendenze.
+      - name: docker build
+        run: docker build -t stremio-anime-resolver:ci .
+
+      - name: Il container parte e /health risponde
+        run: |
+          set -euo pipefail
+          docker run -d --name sar-ci -p 7000:7000 stremio-anime-resolver:ci
+
+          # Attesa esplicita invece di `sleep` fisso: il probe gira finche'
+          # il server non risponde, e fallisce con un messaggio che dice cosa
+          # non tornava invece di lasciare un timeout muto.
+          for i in $(seq 1 30); do
+            if body=$(curl -fsS http://127.0.0.1:7000/health 2>/dev/null); then
+              echo "health ok: $body"
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "::error::il container non ha risposto su /health in 30 tentativi"
+              docker logs sar-ci
+              exit 1
+            fi
+            sleep 1
+          done
+
+          curl -fsS http://127.0.0.1:7000/manifest.json > /dev/null
+          echo "manifest ok"
+
+      - name: log del container
+        if: failure()
+        run: docker logs sar-ci
+
+      - name: cleanup
+        if: always()
+        run: docker rm -f sar-ci

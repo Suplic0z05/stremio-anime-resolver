@@ -1,0 +1,45 @@
+# Nessuna dipendenza npm: questa directory esiste solo per il caso in cui ne
+# venisse aggiunta una in futuro, e per non committare il albero di installazione.
+node_modules/
+
+# Segreti e configurazione locale. Nessuno di questi file va nel repo: il
+# resolver non richiede chiavi API, quindi se compare qui dentro qualcosa non
+# è quello che pensiamo.
+.env
+.env.*
+*.pem
+*.key
+
+# Log e artefatti di esecuzione. I log del server di prova stanno in /tmp, non
+# qui, ma una redirection sbagliata li lascia nella radice.
+*.log
+npm-debug.log*
+logs/
+
+# Copertura e output di test.
+coverage/
+.nyc_output/
+*.lcov
+*.tsbuildinfo
+
+# File temporanei ed editor.
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+tmp/
+scratch/
+*.tmp
+
+# Lo `shiru-italian-streaming` upstream e' un progetto SEPARATO e vive come
+# directory sorella. Non deve finire qui dentro: questo repo contiene la
+# riscritta, il sorgente originale resta nel suo repo. Se qualcuno clona dentro
+# per sbaglio, le copie non vanno committate due volte.
+shiru-italian-streaming/
+
+# NOTA: `deploy/`, `Dockerfile`, `.dockerignore`, `LICENSE`, `DEPLOYMENT.md` e
+# `README.md` NON sono esclusi di proposito. Sono artefatti consegnati e
+# revisionabili, e il Dockerfile deve poterli copiare.

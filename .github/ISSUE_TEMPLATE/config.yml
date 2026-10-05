@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Discussion (domande, idee, uso)
+    url: https://github.com/Suplic0z05/stremio-anime-resolver/discussions
+    about: Per domande d'uso e idee che non sono ancora un bug o una richiesta.

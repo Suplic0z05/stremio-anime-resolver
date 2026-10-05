@@ -1,0 +1,52 @@
+# Contesto di build: cosa NON viene spedito dentro l'immagine.
+#
+# Il Dockerfile copia esplicitamente `package.json`, `src/` e `LICENSE`, quindi
+# nulla di questo elenco finisce nell'immagine. Serve a due cose: tenere il
+# contesto piccolo e impedire che un artefatto locale finisca per caso dentro
+# un livello dell'immagine.
+
+# --- dipendenze -------------------------------------------------------------
+# Il progetto non ne ha (`"dependencies": {}`), quindi se `node_modules`
+# esiste e' un artefatto locale di qualcun altro, mai un input della build.
+node_modules/
+npm-debug.log*
+yarn-error.log*
+.pnpm-store/
+
+# --- controllo versioni e CI ------------------------------------------------
+.git/
+.gitignore
+.github/
+
+# --- artefatti di test ------------------------------------------------------
+# Il server non importa nulla da qui, e `node --test` non gira nel container.
+test/
+coverage/
+.nyc_output/
+*.tap
+
+# --- stato locale e generati ------------------------------------------------
+# Il progetto e' stateless: niente database, niente cache su disco, niente URL
+# risolti memorizzati. E' una scelta, non una dimenticanza: il token che
+# porta il link scade (README:236, `expires` ~ now + 12h) e quindi il progetto
+# non implementa cache a nessun livello (stessa sezione) -- un URL in cache
+# non e' un URL lento, e' un URL rotto. Qualsiasi cartella che appaia qui
+# dentro e' roba di sviluppo, non del servizio.
+output/
+out/
+dist/
+tmp/
+.cache/
+.env
+.env.*
+*.log
+*.pid
+*.sock
+.DS_Store
+
+# --- non servono a far girare il server -------------------------------------
+deploy/
+Dockerfile
+.dockerignore
+DEPLOYMENT.md
+README.md
