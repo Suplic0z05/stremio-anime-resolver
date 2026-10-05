@@ -25,8 +25,8 @@
   },
   "scripts": {
     "start": "node src/server.js",
-    "test": "node --test test/",
-    "check": "for f in $(find src test \\( -name '*.js' -o -name '*.mjs' \\) | sort); do node --check \"$f\" || exit 1; done"
+    "test": "node --test",
+    "check": "for f in $(find src test test-helpers \\( -name '*.js' -o -name '*.mjs' \\) | sort); do node --check \"$f\" || exit 1; done"
   },
   "keywords": [
     "stremio",

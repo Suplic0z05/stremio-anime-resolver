@@ -10,13 +10,28 @@
  * "importable da Node" requirement.
  */
 
-import test, { describe } from 'node:test'
+import test, { describe, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { SOURCES, SOURCE_TIMEOUT_MS, getSource, resolveMovie, resolveSeries } from '../src/resolver.js'
 import animeworld from '../src/sources/animeworld.js'
 import animesaturn from '../src/sources/animesaturn.js'
 import animeunity from '../src/sources/animeunity.js'
+import { holdLoop } from '../test-helpers/hold-loop.mjs'
+
+// I guard di `raceTimeout` sono `unref()` per contratto, quindi da soli non
+// tengono vivo il loop; in produzione a tenerlo aperto e' il socket del server.
+// Un file di test non ha un ascolto, quindi deve fornire l'equivalente
+// esplicitamente: senza questo, le promise appese non si assestano mai e
+// `node:test` cancella il resto del file con `# fail 0`.
+let releaseLoop = null
+before(() => {
+  releaseLoop = holdLoop()
+})
+after(() => {
+  releaseLoop?.()
+  releaseLoop = null
+})
 
 /**
  * A source stub whose `single`/`movie`/`batch` do what the test says.

@@ -26,7 +26,7 @@
  * `node:test` + `node:assert/strict`. Nessuna rete: le fonti sono iniettate.
  */
 
-import { test, describe } from 'node:test';
+import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -37,6 +37,26 @@ import { resolveMovie, resolveSeries } from '../src/resolver.js';
 import { createApiRoute } from '../src/routes/api.js';
 import { createCatalogRoute, emittableKitsuId } from '../src/routes/catalog.js';
 import { createStreamRoute } from '../src/routes/stream.js';
+import { holdLoop } from '../test-helpers/hold-loop.mjs';
+
+// Questo file e' quello che piu' dipende dal loop vivo: qui le tre fonti non
+// rispondono MAI, quindi ogni classificazione 504 vs 500 dipende da una promise
+// appesa che la scadenza deve sbloccare. Le guard sono `unref()` per contratto, e
+// in produzione a tenere aperto il ciclo e' il socket del server; un file di test
+// non ha un ascolto, quindi se il loop drena la scadenza non arriva mai, la promise
+// non si assesta e `node:test` cancella il resto del file con `# fail 0`.
+//
+// La pompa NON si propaga al figlio di `il timer di guardia NON tiene vivo il
+// processo`: quel figlio importa solo i moduli di `src/`, quindi la sua uscita
+// resta dovuta unicamente al fatto che il guard e' `unref()`.
+let releaseLoop = null;
+before(() => {
+  releaseLoop = holdLoop();
+});
+after(() => {
+  releaseLoop?.();
+  releaseLoop = null;
+});
 
 const execFileAsync = promisify(execFile);
 

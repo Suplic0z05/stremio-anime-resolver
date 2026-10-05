@@ -11,7 +11,7 @@
  * Cosi' si verifica l'header CORS (`headers`) senza aprire una porta.
  */
 
-import { test, describe } from 'node:test';
+import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
@@ -32,6 +32,29 @@ import { createManifestRoute } from '../src/manifest.js';
 import { createCatalogRoute, toMetaSummary } from '../src/routes/catalog.js';
 import { createMetaRoute } from '../src/routes/meta.js';
 import { createStreamRoute } from '../src/routes/stream.js';
+import { holdLoop } from '../test-helpers/hold-loop.mjs';
+
+// I guard sono `unref()` per contratto (vedi `withTimeout` piu' sotto: e' esattamente
+// la proprieta' che quel blocco di test dimostra), quindi da soli NON tengono vivo
+// il ciclo degli eventi; in produzione a tenerlo aperto e' il socket del server. Un
+// file di test non ha un ascolto e quindi deve fornire l'equivalente esplicitamente:
+// senza questo, `withTimeout(new Promise(() => {}), 30_000)` non si assesta mai, la
+// scadenza non arriva mai e `node:test` cancella il resto del file con `# fail 0`.
+//
+// La pompa non si propaga ai processi figli: il figlio lanciato piu' sotto importa
+// solo `src/manifest.js`, quindi "il guard NON tiene aperto il PROCESSO" resta vero
+// anche con questo `before` attivo qui.
+//
+// NOTA: la pompa usa `setImmediate` e NON `setTimeout`, perche' un timer pendente
+// compare in `getActiveResourcesInfo()` come 'Timeout' e falserebbe `countHoldingTimers`.
+let releaseLoop = null;
+before(() => {
+  releaseLoop = holdLoop();
+});
+after(() => {
+  releaseLoop?.();
+  releaseLoop = null;
+});
 
 // ---------------------------------------------------------------------------
 // Finte

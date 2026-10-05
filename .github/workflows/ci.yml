@@ -47,6 +47,20 @@ jobs:
         # Coerente con `engines.node: >=20` in package.json. Il minimo e' il
         # contratto, gli altri due sono dove i futuri utenti installeranno
         # davvero Node, e `Array.prototype` / fetch cambiano comportamento.
+        #
+        # La matrice resta perche' il contratto e' >=20: qui e' successo che node
+        # 20 e 22 dessero 0 fallimenti ma decine di `# cancelled`, cioe' una suite
+        # che non verificava niente, mentre node 24 era verde. Il confine del
+        # keep-alive e' proprio node 24 (da li' in poi la pipe IPC del runner e'
+        # ref'd e tiene il loop per caso), quindi la matrice NON puo' essere
+        # ridotta a 24: li' il bug non si vede.
+        #
+        # Nota sul selettore: `node --test test/` (una directory nuda come
+        # selettore) e' MODULE_NOT_FOUND da node 22 in poi, quindi su 22 e 24 la
+        # job non eseguiva un solo test e lo riportava come 1 fallimento. Per questo
+        # `npm test` e' `node --test` puro: la discovery trova gli stessi file su
+        # 20/22/24/26. Un glob quotato come `test/**/*.test.mjs` e' peggio: su node 20
+        # e' un no-op silenzioso.
         node: ['20', '22', '24']
     steps:
       - uses: actions/checkout@v4
@@ -59,13 +73,25 @@ jobs:
         run: npm run check
 
       - name: Suite offline
-        run: npm test
+        # `--test-reporter=tap` e' obbligatorio, non cosmetico: senza, node >= 24
+        # stampa il reporter "spec" (con `✖` e riassunto a colori) mentre node 20/22
+        # stampano TAP, quindi lo STESSO fallimento si legge come "# fail 1" su 20/22
+        # e come "0 not ok" su 24. Il TAP e' l'unico formato identico sulle quattro
+        # versioni della matrice, quindi e' l'unico su cui si puo' fare un gate.
+        #
+        # Il gate di questa CI non guarda il solo exit code: questa classe di bug
+        # (promise appesa + loop che drena) si manifesta come CANCELLAMENTI con
+        # `# fail 0`, cioe' una suite "verde" che non ha verificato niente. Le cinque
+        # righe di riepilogo vanno lette tutte: tests / pass / fail / cancelled / skipped.
+        run: npm test -- --test-reporter=tap
 
       - name: Suite live (solo su richiesta manuale)
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.live }}
         env:
           SAR_LIVE: '1'
-        run: npm test
+        # Stesso reporter della suite offline: senza, questa job legge i fallimenti
+        # con un formato diverso da quello su cui e' scritto il commento sopra.
+        run: npm test -- --test-reporter=tap
 
   docker:
     name: build immagine
