@@ -7,8 +7,9 @@
  *   1. tre fonti in timeout -> 500 "internal error" invece di 504 "upstream
  *      timeout", perche' l'errore del resolver non portava la classificazione
  *      che `errorToResponse` guarda;
- *   2. `raceTimeout` non chiamava `unref()` sul suo timer di guardia e ignorava
- *      il `label` che gli veniva passato;
+ *   2. `raceTimeout` ignorava il `label` che gli veniva passato, e teneva il suo
+ *      timer di guardia `unref()`: senza ascolto, il processo moriva con codice
+ *      13 e stderr VUOTO invece di consegnare la classificazione `ETIMEDOUT`;
  *   3. il catalogo pubblicava `id: "ku:"` per una riga di ricerca senza id, e la
  *      rotta meta rispondeva 404 a quell'id;
  *   4. il catalogo ignorava il segmento `extra` che Stremio manda, e una ricerca
@@ -22,6 +23,15 @@
  * reale, e il budget della rotta e' piu' GENEROSO di quello del resolver, cosi'
  * che a classificare la risposta sia il fallimento del resolver e non la guardia
  * esterna.
+ *
+ * ── PERCHE' IL DIFETTO 2 HA DUE PROVE SEPARATE ────────────────────────────────
+ * Il difetto era "nessuno sapeva nulla", e una prova sola non lo chiude: se ne
+ * serve una che osserva la SCADENZA (un figlio che esce con `ETIMEDOUT`, e che
+ * con `unref()` uscirebbe con 13 e zero byte) e una che osserva la PULIZIA (il
+ * `finally` che libera la guardia quando la risposta arriva prima). La prima puo'
+ * stare solo in un processo figlio, perche' `holdLoop` in questo file tiene vivo
+ * il loop e mascherebbe il difetto; la seconda puo' stare in-process perche' non
+ * riguarda il loop.
  *
  * `node:test` + `node:assert/strict`. Nessuna rete: le fonti sono iniettate.
  */
@@ -41,14 +51,14 @@ import { holdLoop } from '../test-helpers/hold-loop.mjs';
 
 // Questo file e' quello che piu' dipende dal loop vivo: qui le tre fonti non
 // rispondono MAI, quindi ogni classificazione 504 vs 500 dipende da una promise
-// appesa che la scadenza deve sbloccare. Le guard sono `unref()` per contratto, e
-// in produzione a tenere aperto il ciclo e' il socket del server; un file di test
-// non ha un ascolto, quindi se il loop drena la scadenza non arriva mai, la promise
-// non si assesta e `node:test` cancella il resto del file con `# fail 0`.
+// appesa che la scadenza deve sbloccare. Nei test non c'e' il socket che in
+// produzione tiene aperto il ciclo, quindi se il loop drena la scadenza non
+// arriva mai, la promise non si assesta e `node:test` cancella il resto del file
+// con `# fail 0`.
 //
-// La pompa NON si propaga al figlio di `il timer di guardia NON tiene vivo il
-// processo`: quel figlio importa solo i moduli di `src/`, quindi la sua uscita
-// resta dovuta unicamente al fatto che il guard e' `unref()`.
+// Per questo file la pompa e' un supporto, NON la prova: il contratto del timer si
+// misura nei processi figli, che non importano questo helper e quindi non hanno
+// niente che tenga vivo il ciclo se non la guardia stessa.
 let releaseLoop = null;
 before(() => {
   releaseLoop = holdLoop();
@@ -213,15 +223,22 @@ describe('raceTimeout', () => {
     );
   });
 
-  test('il timer di guardia NON tiene vivo il processo', async () => {
+  test('la guardia referenziata consegna ETIMEDOUT anche senza ascolto', async () => {
     // Un processo vero, non `process.getActiveResourcesInfo()`: l'affermazione
-    // riguarda il loop che resta acceso, e l'unica sonda onesta per quello e' un
-    // processo che esce.
+    // riguarda il loop che resta acceso E la scadenza che deve essere consegnata,
+    // e l'unica sonda onesta per le due cose e' un processo che esce.
     //
-    // I due numeri sono distanti: il figlio esce in ~200 ms (misurato) e la
-    // guardia vale 50 s, quindi un timer non sganciato farebbe fallire il test per
-    // TIMEOUT, non per assenza di codice. La soglia di 25 s lascia 25x margine
-    // sull'host carico senza smettere di discriminare.
+    // Il contratto e' INVERTITO rispetto alla versione precedente di questo test.
+    // Il timer di `raceTimeout` e' referenziato: da solo tiene vivo il loop, quindi la
+    // scadenza arriva e la classificazione viene consegnata. Con `unref()` questo
+    // stesso figlio uscirebbe IMMEDIATAMENTE con codice 13 e stderr VUOTO — silenzioso,
+    // senza `ETIMEDOUT` — che e' esattamente il difetto che il ref corregge.
+    //
+    // Nessuna pompa: il figlio importa solo `src/`, quindi l'unico handle possibile e'
+    // la guardia. Budget volutamente piccolo (2 s) e margine di kill ampio (15 s): un
+    // hang deve sembrare un KILL, non un passaggio lento.
+    const CHILD_BUDGET_MS = 2_000;
+    const KILL_AFTER_MS = 15_000;
     const resolverUrl = pathToFileURL(fileURLToPath(new URL('../src/resolver.js', import.meta.url))).href;
     const child = `
       import { resolveSeries } from '${resolverUrl}';
@@ -229,19 +246,179 @@ describe('raceTimeout', () => {
       resolveSeries({
         title: 'X',
         sources: [stalled('a'), stalled('b'), stalled('c')],
-        timeoutMs: 50_000,
-      }).catch(() => {});
+        timeoutMs: ${CHILD_BUDGET_MS},
+      }).catch((err) => { process.stderr.write('CODE=' + err.code + '\\nMESSAGE=' + err.message); });
     `;
+    const started = process.hrtime.bigint();
+    let stdout;
+    let stderr;
     try {
-      const { stdout, stderr } = await execFileAsync(process.execPath, ['--input-type=module', '-e', child], {
-        timeout: 25_000,
-      });
-      assert.equal(stdout, '');
-      assert.equal(stderr, '');
+      ({ stdout, stderr } = await execFileAsync(process.execPath, ['--input-type=module', '-e', child], {
+        timeout: KILL_AFTER_MS,
+      }));
     } catch (err) {
       assert.fail(
-        `il processo figlio non e' uscito: ${err.killed ? 'ucciso dal timeout (timer ancora agganciato)' : err.message}`,
+        `il processo figlio non e' uscito: ${err.killed ? 'ucciso dal timeout (la guardia non ha consegnato)' : err.message}`,
       );
+    }
+    const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+
+    // Arrivare qui senza passare dal `catch` significa gia' exit 0: `execFileAsync`
+    // risolve solo su uscita pulita, e un figlio ucciso o abortito finirebbe nel fail.
+    assert.equal(stdout, '', 'il figlio non deve scrivere su stdout');
+    assert.ok(stderr.includes('CODE=ETIMEDOUT'), `classificazione assente: ${JSON.stringify(stderr)}`);
+    // Il label per fonti, nella forma piena `timeout 2000 ms (a)`. Un semplice
+    // `includes('a')` sarebbe VACUO: la 'a' compare anche in "nessuna fonte ha
+    // risolto", quindi passerebbe anche senza alcun label.
+    assert.ok(
+      stderr.includes(`timeout ${CHILD_BUDGET_MS} ms (a)`),
+      `label della fonte assente: ${JSON.stringify(stderr)}`,
+    );
+    // Ha ATTESO il budget (non e' uscito subito) e resta limitato (nessun hang).
+    assert.ok(
+      elapsedMs >= CHILD_BUDGET_MS,
+      `uscito in ${elapsedMs.toFixed(0)} ms, prima del budget di ${CHILD_BUDGET_MS} ms`,
+    );
+    assert.ok(elapsedMs < KILL_AFTER_MS, `impiegato ${elapsedMs.toFixed(0)} ms`);
+  });
+
+  // ── LA PARTE OPPOSTA DELLO STESSO TIMER: esistere, e non restare appeso ───────
+  // Il test precedente dimostra che il timer tiene vivo il loop. Questo dimostra
+  // che viene comunque PULITO quando la risposta arriva prima: e' il `finally`
+  // in `raceTimeout`, e senza di esso ogni risposta veloce lascerebbe un handle
+  // pendente per l'intero budget di 25 s.
+  //
+  // Il percorso e' in-process e puo' esserlo: qui la prova non riguarda il loop,
+  // quindi la pompa di `holdLoop` non la maschererebbe. I numeri sono misurati
+  // (3 fonti -> 3 timer creati, 3 puliti, 0 pendenti).
+  test('la guardia viene pulita quando la risposta arriva prima', async () => {
+    const created = [];
+    const cleared = new Set();
+    const realSetTimeout = globalThis.setTimeout;
+    const realClearTimeout = globalThis.clearTimeout;
+    globalThis.setTimeout = (...args) => {
+      const timer = realSetTimeout(...args);
+      created.push(timer);
+      return timer;
+    };
+    globalThis.clearTimeout = (timer) => {
+      cleared.add(timer);
+      return realClearTimeout(timer);
+    };
+
+    const row = (label) => ({ title: `N - Ep 12 [${label}]`, link: 'https://s.example/12.mp4', hash: '', seeders: 0, leechers: 0, type: 'http' });
+    const fast = (id) => ({ id, label: id, instance: { single: async () => [row(id)] } });
+
+    let streams;
+    try {
+      streams = await resolveSeries({ title: 'X', sources: [fast('a'), fast('b'), fast('c')] });
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+      globalThis.clearTimeout = realClearTimeout;
+    }
+
+    // Prima il percorso, poi il conto: senza questo, un resolver che non creasse
+    // nessun timer farebbe passare `leaked === 0` senza aver provato nulla.
+    assert.equal(streams.length, 3, `il percorso veloce non ha risolto: ${JSON.stringify(streams)}`);
+    assert.equal(created.length, 3, `attesa una guardia per fonte, creati ${created.length} timer`);
+    const leaked = created.filter((timer) => !cleared.has(timer));
+    assert.deepEqual(leaked, [], `timer non puliti: ${leaked.length} su ${created.length}`);
+  });
+
+  // ── PERCHE' ANCHE QUI, IN UN FIGLIO, E NON IN-PROCESS ────────────────────────
+  // Questo file chiama `holdLoop()` nel suo `before`, quindi UNA PROVA IN-PROCESS
+  // PASSEREBBE ANCHE CON IL DIFETTO PRESENTE: la pompa `setImmediate` tiene vivo il
+  // loop, la guardia `unref()` sembra funzionare e il test e' verde. Solo un vero
+  // processo figlio, senza pompa e senza ascolto, distingue `ref` da `unref`.
+  //
+  // I due casi coprono i due lati del contratto, e sono entrambi numeri misurati:
+  //
+  //   budget ordinati   -> la risposta arriva e il PROCESSO ESCE SUBITO. Il
+  //                        "non deve sopravvivere alla risposta" resta vero con il
+  //                        ref, ed e' la proprieta' che conta in produzione.
+  //   budget corto      -> la risposta arriva comunque, ma il timer ref'd del
+  //                        resolver sopravvive e tiene il loop fino alla propria
+  //                        scadenza. E' un hold LIMITATO e osservabile, non una
+  //                        morte silenziosa: si asserisce come numero, non si augura.
+  test('la rotta risponde e il figlio esce senza sopravvivere alla risposta', async () => {
+    const CASES = [
+      // rotta 5 s, resolver 1 s -> ordinati: nessun hold dopo la risposta.
+      { name: 'ordinati', routeMs: 5_000, resolverMs: 1_000, expectLinger: false },
+      // rotta 400 ms, resolver 3 s -> inversione: la rotta vince, il resolver tiene.
+      { name: 'budget corto', routeMs: 400, resolverMs: 3_000, expectLinger: true },
+    ];
+
+    for (const { name, routeMs, resolverMs, expectLinger } of CASES) {
+      const routeUrl = pathToFileURL(fileURLToPath(new URL('../src/routes/stream.js', import.meta.url))).href;
+      const resolverUrl = pathToFileURL(fileURLToPath(new URL('../src/resolver.js', import.meta.url))).href;
+      // Il resolver e' QUELLO VERO, non uno stub: il numero che tiene vivo il loop e'
+      // il timer dentro `raceTimeout`, quindi se qualcuno rimette `unref()` questa
+      // prova deve fallire. Uno stub con un `setTimeout` proprio avrebbe tenuto il
+      // loop comunque e la prova sarebbe passata COL DIFETTO PRESENTE — ed e'
+      // esattamente il buco che una verifica con il bug ripristinato ha mostrato.
+      //
+      // `?title=X` con `kitsu: null` evita il lookup del titolo: e' il percorso che
+      // `src/routes/stream.js` documenta per essere testabile senza rete, e serve
+      // perche' senza titolo il resolver vero restituirebbe `[]` senza mai scadere.
+      // `res` non viene passato: l'handler restituisce l'envelope `{ status, body,
+      // headers }` e non serve aprire una porta.
+      const child = `
+        import { createStreamRoute } from '${routeUrl}';
+        import { resolveMovie, resolveSeries } from '${resolverUrl}';
+        const t0 = process.hrtime.bigint();
+        const ms = () => Number(process.hrtime.bigint() - t0) / 1e6;
+        const stalled = (id) => ({ id, label: id, instance: { single: () => new Promise(() => {}), movie: () => new Promise(() => {}) } });
+        const sources = [stalled('a'), stalled('b'), stalled('c')];
+        const resolver = {
+          resolveMovie: (q) => resolveMovie({ ...q, sources, timeoutMs: ${resolverMs} }),
+          resolveSeries: (q) => resolveSeries({ ...q, sources, timeoutMs: ${resolverMs} }),
+        };
+        const req = { method: 'GET', url: '/stream/movie/ku:12.json?title=X', headers: { host: 'localhost' } };
+        const route = createStreamRoute({ kitsu: null, resolver, timeoutMs: ${routeMs} });
+        const envelope = await route(req);
+        process.stdout.write('STATUS=' + envelope.status + ' at ' + ms().toFixed(0) + '\\n');
+      `;
+      const started = process.hrtime.bigint();
+      let stdout;
+      try {
+        ({ stdout } = await execFileAsync(process.execPath, ['--input-type=module', '-e', child], {
+          timeout: routeMs + 15_000,
+        }));
+      } catch (err) {
+        // Il difetto si manifesta QUI, non nelle asserzioni: il figlio esce con 13
+        // e stdout vuoto, e `execFile` solleva. Senza questo `catch` il messaggio
+        // sarebbe "Command failed" con lo script incollato dentro, che non dice
+        // nulla sulla causa.
+        assert.fail(
+          `[${name}] il figlio non ha risposto: ${err.killed ? 'ucciso dal timeout' : `exit ${err.code}, stdout ${JSON.stringify(err.stdout ?? '')}`}`
+            + ' — con unref() la guardia non tiene il loop e il figlio muore in silenzio',
+        );
+      }
+      // Il tempo del padre E' la vita del figlio: nessun `process.on('exit')`, che
+      // su pipe e' asincrono e puo' perdere la riga proprio nel momento che conta.
+      const wallMs = Number(process.hrtime.bigint() - started) / 1e6;
+      const responseMs = Number(/STATUS=(\d+) at (\d+)/.exec(stdout)?.[2]);
+
+      assert.match(stdout, /STATUS=504 at /, `[${name}] la rotta deve rispondere 504: ${JSON.stringify(stdout)}`);
+      // La risposta arriva quando vince il GUARDIANO piu' corto, non il resolver.
+      assert.ok(
+        responseMs <= Math.min(routeMs, resolverMs) + 1_500,
+        `[${name}] risposta a ${responseMs} ms, oltre il budget che doveva vincere`,
+      );
+      if (expectLinger) {
+        // L'hold e' REALE e qui viene scritto come numero. Senza il ref questo figlio
+        // uscirebbe con codice 13 e stdout VUOTO invece di 504: silenzioso.
+        assert.ok(
+          wallMs >= resolverMs * 0.5,
+          `[${name}] atteso un hold fino a ~${resolverMs} ms, misurati ${wallMs} ms`,
+        );
+        assert.ok(wallMs < resolverMs + 10_000, `[${name}] hold illimitato: ${wallMs} ms`);
+      } else {
+        assert.ok(
+          wallMs < resolverMs + 1_500,
+          `[${name}] il processo ha sopravvissuto alla risposta: ${wallMs} ms`,
+        );
+      }
     }
   });
 });

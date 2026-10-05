@@ -350,12 +350,34 @@ async function fanOut(targets, call, timeoutMs, wanted) {
  * `timeout 25000 ms` rejections are indistinguishable in the aggregate, and
  * standing alone the message says nothing about what timed out.
  *
- * The guard timer is `unref()`ed defensively, the same way `withTimeout` does in
- * `src/manifest.js`: by the time the fan-out rejects, the HTTP response has
- * already been sent, so three pending 25 s guards would keep the process alive
- * with nothing left to deliver. The guard exists to bound what the CLIENT waits
- * for, not to keep the loop warm — when a server socket is pending, that is the
- * server, not the guard, that holds the process open.
+ * The guard timer is REFERENCED, and that is the correct shape: this module has to
+ * be able to deliver something even when there is no listener. With `unref()`,
+ * measured on Node 20, 22 and 24 with a real route, a fake `res` and no socket:
+ * route budget 1 s -> exit 13, zero bytes; default 30 s budget -> exit 13, zero
+ * bytes. The route's own guard is `unref()`ed too (`src/manifest.js:202`), so it
+ * cannot rescue the request either: with both guards unref'd nothing ever delivers
+ * the `ETIMEDOUT` classification.
+ *
+ * What that costs, and when:
+ *
+ * 1. Nothing under the production defaults. The route's default budget (30 s) is
+ *    larger than `SOURCE_TIMEOUT_MS` (25 s), so the resolver's own guard fires
+ *    first at 25021 ms, classifies, and the process exits immediately.
+ * 2. A bounded, observable hold ONLY when a caller builds a route with a budget
+ *    BELOW `SOURCE_TIMEOUT_MS`. Measured: 504 at 1004 ms, exit 0, wall 25.3 s.
+ *
+ * The boundary, not uniformity: `withTimeout` in `src/manifest.js` KEEPS its
+ * `unref()`. It is a different guard, and it is safe only where something else
+ * holds the loop open — in the kitsu path that is the referenced abort timer at
+ * `src/kitsu.js:188`.
+ *
+ * This aligns the resolver with behaviour that already existed; it does not
+ * resolve a new class. The identical linger was already reachable on
+ * catalog/meta, and `src/kitsu.js` is NOT touched by this change: with a 1 s
+ * route budget and a hanging network it measures 504 at 1005 ms but wall 20020 ms
+ * on Node 20 and 20030 ms on Node 24, the hold coming from kitsu's internal abort
+ * timer (`REQUEST_TIMEOUT_MS = 20 s`), which survives because the route wraps
+ * `kitsu.meta` in a budget instead of passing it down. That case stays open.
  *
  * Rejecting here does NOT cancel the underlying scraper work: no `AbortController`
  * is plumbed into the sources, so the three fetches keep running in the
@@ -372,7 +394,6 @@ async function raceTimeout(promise, ms, label) {
   let timer
   const expiry = new Promise((_resolve, reject) => {
     timer = setTimeout(() => reject(sourceTimeoutError(ms, label)), ms)
-    if (typeof timer?.unref === 'function') timer.unref()
   })
   try {
     return await Promise.race([promise, expiry])

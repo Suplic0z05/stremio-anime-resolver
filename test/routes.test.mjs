@@ -34,12 +34,16 @@ import { createMetaRoute } from '../src/routes/meta.js';
 import { createStreamRoute } from '../src/routes/stream.js';
 import { holdLoop } from '../test-helpers/hold-loop.mjs';
 
-// I guard sono `unref()` per contratto (vedi `withTimeout` piu' sotto: e' esattamente
-// la proprieta' che quel blocco di test dimostra), quindi da soli NON tengono vivo
+// Il guard di `withTimeout` e' `unref()` per contratto (vedi piu' sotto: e' esattamente
+// la proprieta' che quel blocco di test dimostra), quindi da solo NON tiene vivo
 // il ciclo degli eventi; in produzione a tenerlo aperto e' il socket del server. Un
 // file di test non ha un ascolto e quindi deve fornire l'equivalente esplicitamente:
 // senza questo, `withTimeout(new Promise(() => {}), 30_000)` non si assesta mai, la
 // scadenza non arriva mai e `node:test` cancella il resto del file con `# fail 0`.
+//
+// Il guard di `raceTimeout` in `src/resolver.js` tiene invece il timer
+// REFERENZIATO, e non e' quello che questa pompa sostituisce: quel file lo
+// dimostra con processi figli, che non importano questo helper.
 //
 // La pompa non si propaga ai processi figli: il figlio lanciato piu' sotto importa
 // solo `src/manifest.js`, quindi "il guard NON tiene aperto il PROCESSO" resta vero

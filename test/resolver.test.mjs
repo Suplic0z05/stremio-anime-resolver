@@ -19,11 +19,13 @@ import animesaturn from '../src/sources/animesaturn.js'
 import animeunity from '../src/sources/animeunity.js'
 import { holdLoop } from '../test-helpers/hold-loop.mjs'
 
-// I guard di `raceTimeout` sono `unref()` per contratto, quindi da soli non
-// tengono vivo il loop; in produzione a tenerlo aperto e' il socket del server.
-// Un file di test non ha un ascolto, quindi deve fornire l'equivalente
-// esplicitamente: senza questo, le promise appese non si assestano mai e
-// `node:test` cancella il resto del file con `# fail 0`.
+// I due guard hanno contratti opposti, ed e' la distinzione che questa pompa
+// rende misurabile. `raceTimeout` tiene il suo timer REFERENZIATO e `withTimeout`
+// in `src/manifest.js` TENE il suo `unref()`. Nei test, dove non c'e' un ascolto,
+// il comportamento dipende da quanto il timer e' agganciato (`ref` o `unref`).
+// Se la guardia di `raceTimeout` perdesse l'handle ref'd, il ciclo drainerebbe e
+// il processo morirebbe con exit 13 e stderr vuoto, invece di consegnare
+// ETIMEDOUT.
 let releaseLoop = null
 before(() => {
   releaseLoop = holdLoop()
